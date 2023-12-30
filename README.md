@@ -228,14 +228,21 @@ a job on a node of 4 GPUs:
 
 ```bash
 cd open_clip/src
-torchrun --nproc_per_node 4 -m training.main \
-    --train-data '/data/cc12m/cc12m-train-{0000..2175}.tar' \
-    --train-num-samples 10968539 \
-    --dataset-type webdataset \
-    --batch-size 320 \
-    --precision amp \
+torchrun --nproc_per_node 2 -m training.main \
+    --train-data '/home/radiance/ego4d_dealt_data/cleaned_output.csv' \
+    --dataset-type "csv" \
+    --batch-size 128 \
     --workers 4 \
-    --imagenet-val /data/imagenet/validation/
+    --train-num-samples 16 
+    --warmup 1 
+    --lr 1e-4 
+    --wd 0.1 
+    --epochs 1 
+    --workers 3 
+    --model ViT-B-32 
+    --report-to "tensorboard" 
+    --log-every-n-steps 10 
+
 ```
 
 #### Multi-Node
