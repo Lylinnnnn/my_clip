@@ -27,10 +27,11 @@ except ImportError:
 
 
 class CsvDataset(Dataset):
-    def __init__(self, input_filename, transforms, img_key, caption_key, sep="\t", tokenizer=None):
+    def __init__(self, input_filename, transforms, img_key = "filepath", caption_key = "title", sep = ",", tokenizer=None):
         logging.debug(f'Loading csv data from {input_filename}.')
-        df = pd.read_csv(input_filename, sep=sep)
-
+        # print(input_filename)
+        df = pd.read_csv(input_filename, sep=",")
+        # print(df)
         self.images = df[img_key].tolist()
         self.captions = df[caption_key].tolist()
         self.transforms = transforms
@@ -451,7 +452,7 @@ def get_csv_dataset(args, preprocess_fn, is_train, epoch=0, tokenizer=None):
         preprocess_fn,
         img_key=args.csv_img_key,
         caption_key=args.csv_caption_key,
-        sep=args.csv_separator,
+        sep=",",
         tokenizer=tokenizer
     )
     num_samples = len(dataset)
