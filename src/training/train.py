@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel.distributed import DistributedDataParallel
+from sklearn.metrics import precision_score, recall_score, f1_score
 
 try:
     import wandb
@@ -79,9 +80,15 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         accum_images, accum_texts, accum_features = [], [], {}
 
     losses_m = {}
+
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     end = time.time()
+
+    # 新增：用于收集 predictions 和 labels
+    all_predictions = []
+    all_labels = []
+
     for i, batch in enumerate(dataloader):
         i_accum = i // args.accum_freq
         step = num_batches_per_epoch * epoch + i_accum
@@ -104,10 +111,16 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                     with torch.no_grad():
                         dist_model_out = dist_model(images, texts)
                     model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
+
                 losses = loss(**model_out, output_dict=True)
 
                 total_loss = sum(losses.values())
                 losses["loss"] = total_loss
+
+                # 新增：收集 predictions 和 labels
+                if 'predictions' in losses and 'labels' in losses:
+                    all_predictions.append(losses['predictions'].cpu())
+                    all_labels.append(losses['labels'].cpu())
 
             backward(total_loss, scaler)
         else:
@@ -245,6 +258,21 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             # resetting batch / data time meters per log window
             batch_time_m.reset()
             data_time_m.reset()
+
+    # 新增：在 epoch 结束时计算和记录指标
+    if all_predictions and all_labels:
+        all_predictions = torch.cat(all_predictions, dim=0)
+        all_labels = torch.cat(all_labels, dim=0)
+        precision = precision_score(all_labels.view(-1).numpy(), all_predictions.view(-1).numpy(), average='macro')
+        recall = recall_score(all_labels.view(-1).numpy(), all_predictions.view(-1).numpy(), average='macro')
+        f1 = f1_score(all_labels.view(-1).numpy(), all_predictions.view(-1).numpy(), average='macro')
+
+        if tb_writer:
+            tb_writer.add_scalar('Precision', precision, epoch)
+            tb_writer.add_scalar('Recall', recall, epoch)
+            tb_writer.add_scalar('F1 Score', f1, epoch)
+
+        logging.info(f'Epoch {epoch} - Precision: {precision}, Recall: {recall}, F1 Score: {f1}')
     # end for
 
 

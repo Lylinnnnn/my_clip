@@ -128,6 +128,27 @@ class ClipLoss(nn.Module):
             F.cross_entropy(logits_per_text, labels)
         ) / 2
 
+        # 计算余弦相似度
+        image_features_norm = F.normalize(image_features, dim=1)
+        text_features_norm = F.normalize(text_features, dim=1)
+        cosine_similarity = torch.matmul(image_features_norm, text_features_norm.T)
+
+        # 确定匹配
+        threshold = 0.5  # 定义一个阈值
+        predictions = (cosine_similarity > threshold).int()
+
+        # 创建真实标签（假设每个图像的正确文本是对角线上的）
+        labels = torch.eye(len(image_features), device=cosine_similarity.device).int()
+
+        # 返回额外的信息，以便于后续计算精确度、召回率和 F1-Score
+        if output_dict:
+            return {
+                "contrastive_loss": total_loss,  # 原有的损失
+                "predictions": predictions,  # 预测的匹配
+                "labels": labels  # 真实标签
+            }
+
+
         return {"contrastive_loss": total_loss} if output_dict else total_loss
 
 
