@@ -9,6 +9,8 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parallel.distributed import DistributedDataParallel
 from sklearn.metrics import precision_score, recall_score, f1_score
+from torch.profiler import profile, record_function, ProfilerActivity, tensorboard_trace_handler
+
 
 try:
     import wandb
@@ -63,6 +65,24 @@ def backward(total_loss, scaler):
 
 
 def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=None):
+
+    prof = profile(
+        schedule = torch.profiler.schedule(
+            wait=2,
+            warmup=1,
+            active=4,
+            repeat=1,
+        ),
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        on_trace_ready=tensorboard_trace_handler("/root/open_clip"+'prof'),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True,
+        with_flops=True,
+        with_modules=True,
+    )
+    prof.start()
+
     device = torch.device(args.device)
     autocast = get_autocast(args.precision)
     input_dtype = get_input_dtype(args.precision)
@@ -114,7 +134,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
                 losses = loss(**model_out, output_dict=True)
 
-                total_loss = sum(losses.values())
+                total_loss = sum(l.float().mean() for l in losses.values())
                 losses["loss"] = total_loss
 
                 # 新增：收集 predictions 和 labels
@@ -204,6 +224,11 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         batch_time_m.update(time.time() - end)
         end = time.time()
         batch_count = i_accum + 1
+
+        prof.step()
+        if i == 20:
+            prof.stop()
+
         if is_master(args) and (i_accum % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
             batch_size = len(images)
             num_samples = batch_count * batch_size * args.accum_freq * args.world_size
@@ -214,7 +239,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             for key, val in losses.items():
                 if key not in losses_m:
                     losses_m[key] = AverageMeter()
-                losses_m[key].update(val.item(), batch_size)
+                mean_val = val.float().mean().item()
+                losses_m[key].update(mean_val, batch_size)
 
             logit_scale_scalar = logit_scale.item()
             loss_log = " ".join(

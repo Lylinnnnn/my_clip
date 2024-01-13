@@ -25,19 +25,32 @@ try:
 except ImportError:
     hvd = None
 
+def is_image_corrupted(image_path):
+    try:
+        with Image.open(image_path) as img:
+            img.verify()  # 验证图片完整性
+        return False
+    except (IOError, SyntaxError):
+        return True
+
 
 class CsvDataset(Dataset):
-    def __init__(self, input_filename, transforms, img_key = "filepath", caption_key = "title", sep = ",", tokenizer=None):
+    def __init__(self, input_filename, transforms, img_key="filepath", caption_key="title", sep=",", tokenizer=None):
         logging.debug(f'Loading csv data from {input_filename}.')
-        # print(input_filename)
-        df = pd.read_csv(input_filename, sep=",")
-        # print(df)
-        self.images = df[img_key].tolist()
-        self.captions = df[caption_key].tolist()
-        self.transforms = transforms
-        logging.debug('Done loading data.')
 
+        df = pd.read_csv(input_filename, sep=sep)
+        self.transforms = transforms
         self.tokenize = tokenizer
+
+        # 过滤掉损坏的图片
+        self.images = []
+        self.captions = []
+        for img_path, caption in zip(df[img_key], df[caption_key]):
+            if not is_image_corrupted(img_path):
+                self.images.append(img_path)
+                self.captions.append(caption)
+
+        logging.debug('Done loading data.')
 
     def __len__(self):
         return len(self.captions)
@@ -46,6 +59,28 @@ class CsvDataset(Dataset):
         images = self.transforms(Image.open(str(self.images[idx])))
         texts = self.tokenize([str(self.captions[idx])])[0]
         return images, texts
+
+
+# class CsvDataset(Dataset):
+#     def __init__(self, input_filename, transforms, img_key = "filepath", caption_key = "title", sep = ",", tokenizer=None):
+#         logging.debug(f'Loading csv data from {input_filename}.')
+#         # print(input_filename)
+#         df = pd.read_csv(input_filename, sep=",")
+#         # print(df)
+#         self.images = df[img_key].tolist()
+#         self.captions = df[caption_key].tolist()
+#         self.transforms = transforms
+#         logging.debug('Done loading data.')
+#
+#         self.tokenize = tokenizer
+#
+#     def __len__(self):
+#         return len(self.captions)
+#
+#     def __getitem__(self, idx):
+#         images = self.transforms(Image.open(str(self.images[idx])))
+#         texts = self.tokenize([str(self.captions[idx])])[0]
+#         return images, texts
 
 
 class SharedEpoch:
