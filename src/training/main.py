@@ -7,11 +7,13 @@ import sys
 import random
 from datetime import datetime
 from functools import partial
+# from peft import LoraConfig, get_peft_model
 
 import numpy as np
 import torch
 from torch import optim
 from torch.cuda.amp import GradScaler
+import time
 
 try:
     import wandb
@@ -67,6 +69,10 @@ def get_latest_checkpoint(path: str, remote : bool):
         return checkpoints[-1]
     return None
 
+# def print_trainable_parameters(model):
+#     for name, param in model.named_parameters():
+#         if param.requires_grad:
+#             print(f"{name}, size: {param.size()}")
 
 def main(args):
     args = parse_args(args)
@@ -239,6 +245,20 @@ def main(args):
         output_dict=True,
         **model_kwargs,
     )
+
+    # # 创建 Lora 配置
+    # config = LoraConfig(
+    #     r=16,
+    #     lora_alpha=16,
+    #     target_modules=["q_proj", "v_proj"],
+    #     lora_dropout=0.1,
+    #     bias="none",
+    # )
+    #
+    # # 应用 Lora 到模型
+    # lora_model = get_peft_model(model, config)
+    # print_trainable_parameters(lora_model)
+
     if args.distill:
         # FIXME: currently assumes the model you're distilling from has the same tokenizer & transforms.
         dist_model, _, _ = create_model_and_transforms(
@@ -354,12 +374,21 @@ def main(args):
 
     # initialize datasets
     tokenizer = get_tokenizer(args.model)
+    # # 记录开始时间
+    # start_time = time.time()
     data = get_data(
         args,
         (preprocess_train, preprocess_val),
         epoch=start_epoch,
         tokenizer=tokenizer,
     )
+    # # 记录结束时间
+    # end_time = time.time()
+    # # 计算时间差
+    # elapsed_time = end_time - start_time
+    # # 打印时间信息
+    # print(f"Time taken for get_data: {elapsed_time:.3f} seconds")
+
     assert len(data), 'At least one train or eval dataset must be specified.'
 
     # create scheduler if train
@@ -429,6 +458,8 @@ def main(args):
 
     loss = create_loss(args)
 
+
+
     for epoch in range(start_epoch, args.epochs):
         if is_master(args):
             logging.info(f'Start epoch {epoch}')
@@ -477,15 +508,15 @@ def main(args):
         logging.info('Final remote sync.')
         remote_sync_process.terminate()
         result = remote_sync(
-            os.path.join(args.logs, args.name), 
-            os.path.join(args.remote_sync, args.name), 
+            os.path.join(args.logs, args.name),
+            os.path.join(args.remote_sync, args.name),
             args.remote_sync_protocol
         )
         if result:
             logging.info('Final remote sync successful.')
         else:
             logging.info('Final remote sync failed.')
-    
+
 
 def copy_codebase(args):
     from shutil import copytree, ignore_patterns

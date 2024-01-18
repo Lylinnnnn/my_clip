@@ -8,6 +8,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel.distributed import DistributedDataParallel
+from sklearn.metrics import precision_score, recall_score, f1_score
+from torch.profiler import profile, record_function, ProfilerActivity, tensorboard_trace_handler
+
 
 try:
     import wandb
@@ -62,6 +65,24 @@ def backward(total_loss, scaler):
 
 
 def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist_model, args, tb_writer=None):
+
+    # prof = profile(
+    #     schedule = torch.profiler.schedule(
+    #         wait=2,
+    #         warmup=1,
+    #         active=4,
+    #         repeat=1,
+    #     ),
+    #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    #     on_trace_ready=tensorboard_trace_handler("/home/radiance/open_clip/src"+'prof'),
+    #     record_shapes=True,
+    #     profile_memory=True,
+    #     with_stack=True,
+    #     with_flops=True,
+    #     with_modules=True,
+    # )
+    # prof.start()
+
     device = torch.device(args.device)
     autocast = get_autocast(args.precision)
     input_dtype = get_input_dtype(args.precision)
@@ -79,9 +100,20 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         accum_images, accum_texts, accum_features = [], [], {}
 
     losses_m = {}
+
+    metrics = {}
+
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     end = time.time()
+
+    # # 新增：用于收集 predictions 和 labels
+    # all_predictions = []
+    # all_labels = []
+
+    all_image_features = []
+    all_text_features = []
+
     for i, batch in enumerate(dataloader):
         i_accum = i // args.accum_freq
         step = num_batches_per_epoch * epoch + i_accum
@@ -93,33 +125,70 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         images = images.to(device=device, dtype=input_dtype, non_blocking=True)
         texts = texts.to(device=device, non_blocking=True)
 
-        data_time_m.update(time.time() - end)
+        # data_time_m.update(time.time() - end)
+        # print(f"Data loading time: {data_time_m.val:.3f}")
         optimizer.zero_grad()
 
         if args.accum_freq == 1:
             with autocast():
                 model_out = model(images, texts)
+                # print(model_out)
+
+                # 获取训练集的特征，用于计算召回率
                 logit_scale = model_out["logit_scale"]
+                image_features = model_out["image_features"]
+                text_features = model_out["text_features"]
+
+                all_image_features.append(image_features.cpu())
+                all_text_features.append(text_features.cpu())
+                logit_scale = logit_scale.mean()
+
                 if args.distill:
                     with torch.no_grad():
                         dist_model_out = dist_model(images, texts)
                     model_out.update({f'dist_{k}': v for k, v in dist_model_out.items()})
+
                 losses = loss(**model_out, output_dict=True)
 
+                # total_loss = sum(l.float().sum() for l in losses.values())
+                # # 计算平均损失，考虑到批次大小
+                # average_loss = total_loss / args.batch_size  # 或者使用其他批次大小，如果有的话
+                #
+                # # 将平均损失添加到损失字典中
+                # losses["loss"] = average_loss
                 total_loss = sum(losses.values())
                 losses["loss"] = total_loss
 
+                # # 新增：收集 predictions 和 labels
+                # if 'predictions' in losses and 'labels' in losses:
+                #     all_predictions.append(losses['predictions'].cpu())
+                #     all_labels.append(losses['labels'].cpu())
+
+
             backward(total_loss, scaler)
+
+
         else:
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 with autocast():
                     model_out = model(images, texts)
+                    print(model_out)
+                    # 获取训练集的特征，用于计算召回率
+                    logit_scale = model_out["logit_scale"]
+                    image_features = model_out["image_features"]
+                    text_features = model_out["text_features"]
+
+                    all_image_features.append(image_features.cpu())
+                    all_text_features.append(text_features.cpu())
+                    logit_scale = logit_scale.mean()
 
                     for f in ("logit_scale", "logit_bias"):
                         model_out.pop(f, None)
 
                     for key, val in model_out.items():
+                        print(f"model_out key: {key}")
+                        print(f"model_out val: {val}")
                         if key in accum_features:
                             accum_features[key].append(val)
                         else:
@@ -143,6 +212,16 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 with autocast():
                     model_out = model(images, texts)
 
+                    # 计算训练集的召回率
+                    logit_scale = model_out["logit_scale"]
+                    image_features = model_out["image_features"]
+                    text_features = model_out["text_features"]
+
+                    all_image_features.append(image_features.cpu())
+                    all_text_features.append(text_features.cpu())
+                    logit_scale = logit_scale.mean()
+
+
                     inputs_no_accum = {}
                     inputs_no_accum["logit_scale"] = logit_scale = model_out.pop("logit_scale")
                     if "logit_bias" in model_out:
@@ -150,15 +229,27 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
                     inputs = {}
                     for key, val in accum_features.items():
+                        #新增
+                        print(f"accum_features key: {key}")
+                        print(f"accum_features val: {val}")
                         accumulated = accum_features[key]
                         inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
 
                     losses = loss(**inputs, **inputs_no_accum, output_dict=True)
                     del inputs
                     del inputs_no_accum
+                    # # 计算每个损失项的总和
+                    # total_loss = sum(l.float().sum() for l in losses.values())
+                    #
+                    # # 计算平均损失，考虑到批次大小
+                    # average_loss = total_loss / args.batch_size  # 或者使用其他批次大小，如果有的话
+                    #
+                    # # 将平均损失添加到损失字典中
+                    # losses["loss"] = average_loss
                     total_loss = sum(losses.values())
                     losses["loss"] = total_loss
 
+                # backward(average_loss, scaler)
                 backward(total_loss, scaler)
 
         if scaler is not None:
@@ -174,7 +265,13 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
                 scaler.step(optimizer)
+            # scaler.update()
+            # start_optimizer_step_time = time.time()  # 记录 optimizer.step() 开始时间
             scaler.update()
+            # end_optimizer_step_time = time.time()  # 记录 optimizer.step() 结束时间
+            #
+            # optimizer_step_time = end_optimizer_step_time - start_optimizer_step_time
+            # print(f"Optimizer step time: {optimizer_step_time:.3f}")
         else:
             if args.grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip_norm, norm_type=2.0)
@@ -189,8 +286,14 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             unwrap_model(model).logit_scale.clamp_(0, math.log(100))
 
         batch_time_m.update(time.time() - end)
+        # print(f"Batch forward time: {batch_time_m.val:.3f}")
         end = time.time()
         batch_count = i_accum + 1
+
+        # prof.step()
+        # if i == 20:
+        #     prof.stop()
+
         if is_master(args) and (i_accum % args.log_every_n_steps == 0 or batch_count == num_batches_per_epoch):
             batch_size = len(images)
             num_samples = batch_count * batch_size * args.accum_freq * args.world_size
@@ -199,9 +302,33 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
 
             # NOTE loss is coarsely sampled, just master node and per log update
             for key, val in losses.items():
+                # 新增
+                print(f"losses.items key: {key}")
+                print(f"losses.items val: {val}")
                 if key not in losses_m:
                     losses_m[key] = AverageMeter()
+                # mean_val = val.float().mean().item()
+                # losses_m[key].update(mean_val, batch_size)
                 losses_m[key].update(val.item(), batch_size)
+
+                # 计算训练召回率
+
+            train_metrics = get_clip_metrics(image_features=torch.cat(all_image_features),
+                                             text_features=torch.cat(all_text_features),
+                                             logit_scale=logit_scale.cpu(), )
+
+            metrics.update({**train_metrics})
+            print(metrics)
+
+            # log_data = {"train/" + name: val for name, val in metrics.items()}
+            # if args.save_logs:
+            #     if tb_writer is not None:
+            #         for name, val in log_data.items():
+            #             tb_writer.add_scalar(name, val, epoch)
+            #
+            # with open(os.path.join(args.checkpoint_path, "train_results.jsonl"), "a+") as f:
+            #     f.write(json.dumps(metrics))
+            # f.write("\n")
 
             logit_scale_scalar = logit_scale.item()
             loss_log = " ".join(
@@ -212,11 +339,21 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             )
             samples_per_second = args.accum_freq * args.batch_size * args.world_size / batch_time_m.val
             samples_per_second_per_gpu = args.accum_freq * args.batch_size / batch_time_m.val
+            # logging.info(
+            #     f"Train Epoch: {epoch} [{num_samples:>{sample_digits}}/{samples_per_epoch} ({percent_complete:.0f}%)] "
+            #     f"Data (t): {data_time_m.avg:.3f} "
+            #     f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
+            #     f"LR: {optimizer.param_groups[0]['lr']:5f} "
+            #      # 新增
+            #     f"Train Recall: " + "    ".join([f"{k}: {round(v, 4):.4f}" for k, v in metrics.items()]),
+            #     f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
+            # )
             logging.info(
                 f"Train Epoch: {epoch} [{num_samples:>{sample_digits}}/{samples_per_epoch} ({percent_complete:.0f}%)] "
                 f"Data (t): {data_time_m.avg:.3f} "
                 f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
                 f"LR: {optimizer.param_groups[0]['lr']:5f} "
+                f"Train Recall: " + "    ".join([f"{k}: {round(v, 4):.4f}" for k, v in metrics.items()]) +
                 f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
             )
 
@@ -227,8 +364,12 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 "samples_per_second": samples_per_second,
                 "samples_per_second_per_gpu": samples_per_second_per_gpu,
                 "scale": logit_scale_scalar,
-                "lr": optimizer.param_groups[0]["lr"]
-            }            
+                "lr": optimizer.param_groups[0]["lr"],
+            }
+
+            for name, val in metrics.items():
+                log_data["train/" + name] = val
+
             log_data.update({name:val.val for name,val in losses_m.items()})
 
             log_data = {"train/" + name: val for name, val in log_data.items()}
@@ -245,6 +386,21 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             # resetting batch / data time meters per log window
             batch_time_m.reset()
             data_time_m.reset()
+
+    # # 新增：在 epoch 结束时计算和记录指标
+    # if all_predictions and all_labels:
+    #     all_predictions = torch.cat(all_predictions, dim=0)
+    #     all_labels = torch.cat(all_labels, dim=0)
+    #     precision = precision_score(all_labels.view(-1).numpy(), all_predictions.view(-1).numpy(), average='macro')
+    #     recall = recall_score(all_labels.view(-1).numpy(), all_predictions.view(-1).numpy(), average='macro')
+    #     f1 = f1_score(all_labels.view(-1).numpy(), all_predictions.view(-1).numpy(), average='macro')
+    #
+    #     if tb_writer:
+    #         tb_writer.add_scalar('Precision', precision, epoch)
+    #         tb_writer.add_scalar('Recall', recall, epoch)
+    #         tb_writer.add_scalar('F1 Score', f1, epoch)
+    #
+    #     logging.info(f'Epoch {epoch} - Precision: {precision}, Recall: {recall}, F1 Score: {f1}')
     # end for
 
 
