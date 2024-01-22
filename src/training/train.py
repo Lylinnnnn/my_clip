@@ -125,7 +125,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
         images = images.to(device=device, dtype=input_dtype, non_blocking=True)
         texts = texts.to(device=device, non_blocking=True)
 
-        # data_time_m.update(time.time() - end)
+        data_time_m.update(time.time() - end)
         # print(f"Data loading time: {data_time_m.val:.3f}")
         optimizer.zero_grad()
 
@@ -134,14 +134,15 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 model_out = model(images, texts)
                 # print(model_out)
 
-                # 获取训练集的特征，用于计算召回率
+                # # 获取训练集的特征，用于计算召回率
                 logit_scale = model_out["logit_scale"]
-                image_features = model_out["image_features"]
-                text_features = model_out["text_features"]
-
-                all_image_features.append(image_features.cpu())
-                all_text_features.append(text_features.cpu())
-                logit_scale = logit_scale.mean()
+                # image_features = model_out["image_features"]
+                # text_features = model_out["text_features"]
+                # import pdb; pdb.set_trace()
+                #
+                # all_image_features.append(image_features.cpu())
+                # all_text_features.append(text_features.cpu())
+                # logit_scale_mean = logit_scale.mean()
 
                 if args.distill:
                     with torch.no_grad():
@@ -173,22 +174,22 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             with torch.no_grad():
                 with autocast():
                     model_out = model(images, texts)
-                    print(model_out)
-                    # 获取训练集的特征，用于计算召回率
+                    # print(model_out)
+                    # # 获取训练集的特征，用于计算召回率
                     logit_scale = model_out["logit_scale"]
-                    image_features = model_out["image_features"]
-                    text_features = model_out["text_features"]
-
-                    all_image_features.append(image_features.cpu())
-                    all_text_features.append(text_features.cpu())
-                    logit_scale = logit_scale.mean()
+                    # image_features = model_out["image_features"]
+                    # text_features = model_out["text_features"]
+                    #
+                    # all_image_features.append(image_features.cpu())
+                    # all_text_features.append(text_features.cpu())
+                    # logit_scale_mean = logit_scale.mean()
 
                     for f in ("logit_scale", "logit_bias"):
                         model_out.pop(f, None)
 
                     for key, val in model_out.items():
-                        print(f"model_out key: {key}")
-                        print(f"model_out val: {val}")
+                        # print(f"model_out key: {key}")
+                        # print(f"model_out val: {val}")
                         if key in accum_features:
                             accum_features[key].append(val)
                         else:
@@ -212,14 +213,14 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 with autocast():
                     model_out = model(images, texts)
 
-                    # 计算训练集的召回率
+                    # # 计算训练集的召回率
                     logit_scale = model_out["logit_scale"]
-                    image_features = model_out["image_features"]
-                    text_features = model_out["text_features"]
-
-                    all_image_features.append(image_features.cpu())
-                    all_text_features.append(text_features.cpu())
-                    logit_scale = logit_scale.mean()
+                    # image_features = model_out["image_features"]
+                    # text_features = model_out["text_features"]
+                    #
+                    # all_image_features.append(image_features.cpu())
+                    # all_text_features.append(text_features.cpu())
+                    # logit_scale_mean = logit_scale.mean()
 
 
                     inputs_no_accum = {}
@@ -230,8 +231,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                     inputs = {}
                     for key, val in accum_features.items():
                         #新增
-                        print(f"accum_features key: {key}")
-                        print(f"accum_features val: {val}")
+                        # print(f"accum_features key: {key}")
+                        # print(f"accum_features val: {val}")
                         accumulated = accum_features[key]
                         inputs[key] = torch.cat(accumulated[:j] + [model_out[key]] + accumulated[j + 1:])
 
@@ -303,29 +304,30 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             # NOTE loss is coarsely sampled, just master node and per log update
             for key, val in losses.items():
                 # 新增
-                print(f"losses.items key: {key}")
-                print(f"losses.items val: {val}")
+                # print(f"losses.items key: {key}")
+                # print(f"losses.items val: {val}")
                 if key not in losses_m:
                     losses_m[key] = AverageMeter()
                 # mean_val = val.float().mean().item()
                 # losses_m[key].update(mean_val, batch_size)
                 losses_m[key].update(val.item(), batch_size)
 
-                # 计算训练召回率
-
-            train_metrics = get_clip_metrics(image_features=torch.cat(all_image_features),
-                                             text_features=torch.cat(all_text_features),
-                                             logit_scale=logit_scale.cpu(), )
-
-            metrics.update({**train_metrics})
-            print(metrics)
-
-            # log_data = {"train/" + name: val for name, val in metrics.items()}
-            # if args.save_logs:
-            #     if tb_writer is not None:
-            #         for name, val in log_data.items():
-            #             tb_writer.add_scalar(name, val, epoch)
+            #     # 计算训练召回率
             #
+            # train_metrics = get_clip_metrics(image_features=torch.cat(all_image_features),
+            #                                  text_features=torch.cat(all_text_features),
+            #                                  logit_scale=logit_scale_mean.cpu(),
+            #                                  )
+            #
+            # metrics.update({**train_metrics})
+            # print(metrics)
+
+            log_data = {"train/" + name: val for name, val in metrics.items()}
+            if args.save_logs:
+                if tb_writer is not None:
+                    for name, val in log_data.items():
+                        tb_writer.add_scalar(name, val, epoch)
+
             # with open(os.path.join(args.checkpoint_path, "train_results.jsonl"), "a+") as f:
             #     f.write(json.dumps(metrics))
             # f.write("\n")
@@ -345,7 +347,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
             #     f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
             #     f"LR: {optimizer.param_groups[0]['lr']:5f} "
             #      # 新增
-            #     f"Train Recall: " + "    ".join([f"{k}: {round(v, 4):.4f}" for k, v in metrics.items()]),
+            #     f"Train Recall: " + "    ".join([f"{k}: {round(v, 4):.4f}" for k, v in metrics.items()]) +
             #     f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
             # )
             logging.info(
@@ -353,7 +355,7 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 f"Data (t): {data_time_m.avg:.3f} "
                 f"Batch (t): {batch_time_m.avg:.3f}, {samples_per_second:#g}/s, {samples_per_second_per_gpu:#g}/s/gpu "
                 f"LR: {optimizer.param_groups[0]['lr']:5f} "
-                f"Train Recall: " + "    ".join([f"{k}: {round(v, 4):.4f}" for k, v in metrics.items()]) +
+                # f"Train Recall: " + "    ".join([f"{k}: {round(v, 4):.4f}" for k, v in metrics.items()]) +
                 f"Logit Scale: {logit_scale_scalar:.3f} " + loss_log
             )
 
@@ -367,8 +369,8 @@ def train_one_epoch(model, data, loss, epoch, optimizer, scaler, scheduler, dist
                 "lr": optimizer.param_groups[0]["lr"],
             }
 
-            for name, val in metrics.items():
-                log_data["train/" + name] = val
+            # for name, val in metrics.items():
+            #     log_data["train/" + name] = val
 
             log_data.update({name:val.val for name,val in losses_m.items()})
 
@@ -470,7 +472,7 @@ def evaluate(model, data, epoch, args, tb_writer=None, tokenizer=None):
             val_metrics = get_clip_metrics(
                 image_features=torch.cat(all_image_features),
                 text_features=torch.cat(all_text_features),
-                logit_scale=logit_scale.cpu(),
+                logit_scale=logit_scale.cpu()
             )
             loss = cumulative_loss / num_samples
             metrics.update(

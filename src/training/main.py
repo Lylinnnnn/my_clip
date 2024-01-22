@@ -9,6 +9,7 @@ from datetime import datetime
 from functools import partial
 # from peft import LoraConfig, get_peft_model
 
+
 import numpy as np
 import torch
 from torch import optim
@@ -537,3 +538,9 @@ def copy_codebase(args):
 
 if __name__ == "__main__":
     main(sys.argv[1:])
+    # lp = LineProfiler()
+    # lp_wrapper = lp(main(sys.argv[1:]))
+    # lp_wrapper()
+    # lp.print_stats()
+
+
